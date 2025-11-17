@@ -1,0 +1,42 @@
+# .github/workflows/docker-publish.yml (最终修正版)
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: ["main"] # 当 main 分支有更新时触发
+
+jobs:
+  build_and_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get Camoufox Download URL
+        id: get_camoufox_url
+        run: |
+          URL=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | grep "browser_download_url.*camoufox-linux.tar.gz" | cut -d : -f 2,3 | tr -d '", ')
+          echo "CAMOUFOX_URL=$URL" >> $GITHUB_ENV
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # --- 新增：设置一个支持缓存的 Docker Buildx 构建器 ---
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ellinalopez/cloud-studio:latest
+          build-args: |
+            CAMOUFOX_URL=${{ env.CAMOUFOX_URL }}
+          # 缓存功能现在可以正常工作了
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

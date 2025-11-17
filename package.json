@@ -1,0 +1,13 @@
+{
+  "name": "web-content-suite",
+  "version": "1.0.0",
+  "description": "A suite for handling web content and tasks.",
+  "dependencies": {
+    "cookie-parser": "^1.4.6",
+    "playwright": "^1.53.1",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "ws": "^8.17.0",
+    "basic-auth": "^2.0.1"
+  }
+}
