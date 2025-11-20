@@ -160,7 +160,7 @@ class AuthSource {
 }
 
 // ===================================================================================
-// BROWSER MANAGEMENT MODULE (日志微调)
+// BROWSER MANAGEMENT MODULE (无修改)
 // ===================================================================================
 
 class BrowserManager {
@@ -172,7 +172,6 @@ class BrowserManager {
     this.context = null;
     this.page = null;
     this.currentAuthIndex = 0;
-    // [伪装] 文件名最好也同步修改，但这里只改引用，以防你忘记改文件名
     this.scriptFileName = "black-browser.js";
     this.launchArgs = [
       "--disable-dev-shm-usage",
@@ -265,7 +264,6 @@ class BrowserManager {
       this.page = await this.context.newPage();
       this.page.on("console", (msg) => {
         const msgText = msg.text();
-        // [伪装] 修改日志匹配
         if (msgText.includes("[BrowserTask]")) {
           this.logger.info(
             `[Browser] ${msgText.replace("[BrowserTask] ", "")}`
@@ -329,7 +327,6 @@ class BrowserManager {
       await this.page.evaluate(() => {
         const overlays = document.querySelectorAll("div.cdk-overlay-backdrop");
         if (overlays.length > 0) {
-          // [伪装] 日志文本修改
           console.log(
             `[BrowserTask] (内部JS) 发现并移除了 ${overlays.length} 个遮罩层。`
           );
@@ -461,10 +458,9 @@ class BrowserManager {
 }
 
 // ===================================================================================
-// SERVER MODULE (核心伪装区)
+// SERVER MODULE (无修改)
 // ===================================================================================
 
-// [伪装] 类名和 serviceName 修改
 class LoggingService {
   constructor(serviceName = "AppService") {
     this.serviceName = serviceName;
@@ -643,7 +639,9 @@ class ConnectionRegistry extends EventEmitter {
   }
 }
 
-// [伪装] 类名和函数名修改
+// ===================================================================================
+// TASK HANDLER MODULE (核心修改区)
+// ===================================================================================
 class TaskHandler {
   constructor(
     serverSystem,
@@ -823,7 +821,6 @@ class TaskHandler {
     }
   }
   
-  // [伪装] 函数名和日志修改
   async processRequest(req, res) {
     const taskId = this._generateTaskId();
     res.on("close", () => {
@@ -935,7 +932,6 @@ class TaskHandler {
     }
   }
 
-  // [伪装] 函数名和日志修改
   async processOpenAIRequest(req, res) {
     const taskId = this._generateTaskId();
     const isOpenAIStream = req.body.stream === true;
@@ -956,7 +952,6 @@ class TaskHandler {
     const googleEndpoint = isOpenAIStream
       ? "streamGenerateContent"
       : "generateContent";
-    // [伪装] 变量名修改
     const taskData = {
       path: `/v1beta/models/${model}:${googleEndpoint}`,
       method: "POST",
@@ -984,6 +979,8 @@ class TaskHandler {
 
         if (isOpenAIStream) {
           if (!res.writableEnded) {
+            // [修复] 即使上游报错，也要给客户端一个标准的结束信号，防止客户端一直等待
+            this._sendErrorChunkToClient(res, initialMessage.message);
             res.write("data: [DONE]\n\n");
             res.end();
           }
@@ -1005,7 +1002,8 @@ class TaskHandler {
       }
 
       if (isOpenAIStream) {
-        res.status(200).set({
+        // [修复] 强制设置流式响应头，即使上游返回的 Content-Type 不正确（例如报错时是 text/plain）
+        res.status(initialMessage.status || 200).set({
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
           Connection: "keep-alive",
@@ -1018,7 +1016,7 @@ class TaskHandler {
             res.write("data: [DONE]\n\n");
             break;
           }
-          if (message.data) {
+           if (message.event_type === 'chunk' && message.data) {
             const translatedChunk = this._translateGoogleToOpenAIStream(
               message.data,
               model
@@ -1104,7 +1102,79 @@ class TaskHandler {
     }
   }
 
-  // [伪装] 函数名和日志修改
+  // [新增] 动态获取模型列表的方法
+  async processModelListRequest(req, res) {
+    const taskId = this._generateTaskId();
+    const taskData = this._prepareTaskData(req, taskId);
+
+    // 1. 强制将请求路径和方法修正为获取 Google 模型列表的真实 API
+    taskData.path = "/v1beta/models";
+    taskData.method = "GET";
+    taskData.body = null; // GET请求没有 body
+    taskData.is_generative = false;
+    taskData.streaming_mode = "fake"; // 非流式请求
+
+    // 2. [关键] 设置一个较大的 pageSize 来获取所有可用模型。
+    // Google API 默认一次只返回很少的模型，设置 100 足够覆盖所有当前和未来的模型。
+    taskData.query_params = { ...req.query, pageSize: 100 };
+
+    this.logger.info(`[CompatLayer] 收到模型列表请求，正在通过浏览器转发至 Google API (pageSize=100)... (任务ID: ${taskId})`);
+
+    const messageQueue = this.connectionRegistry.createMessageQueue(taskId);
+
+    try {
+      this._sendTaskToBrowser(taskData);
+
+      // 等待浏览器返回的响应头
+      const headerMessage = await messageQueue.dequeue(60000); // 60秒超时
+      if (headerMessage.event_type === "error") {
+        throw new Error(headerMessage.message || "获取模型列表时上游API出错");
+      }
+
+      // 聚合所有数据块
+      let fullBody = "";
+      while (true) {
+        const message = await messageQueue.dequeue(60000);
+        if (message.type === "STREAM_END") break;
+        if (message.event_type === "chunk" && message.data) {
+          fullBody += message.data;
+        }
+      }
+
+      let googleModels = [];
+      try {
+        const googleResponse = JSON.parse(fullBody);
+        googleModels = googleResponse.models || [];
+      } catch (e) {
+        this.logger.warn(`[CompatLayer] 解析Google模型列表JSON失败: ${e.message}`);
+      }
+      
+      // 将 Google 返回的格式转换为 OpenAI 兼容的格式
+      const openaiModels = googleModels.map(model => {
+        const id = model.name.replace("models/", "");
+        return {
+          id: id,
+          object: "model",
+          created: Math.floor(Date.now() / 1000),
+          owned_by: "google",
+        };
+      });
+
+      res.status(200).json({
+        object: "list",
+        data: openaiModels
+      });
+      
+      this.logger.info(`[CompatLayer] ✅ 成功获取并向客户端返回了 ${openaiModels.length} 个模型。`);
+
+    } catch (error) {
+      this.logger.error(`[CompatLayer] ❌ 获取模型列表失败: ${error.message}`);
+      this._sendErrorResponse(res, 500, `Failed to fetch model list from upstream: ${error.message}`);
+    } finally {
+      this.connectionRegistry.removeMessageQueue(taskId);
+    }
+  }
+  
   _cancelTaskInBrowser(taskId) {
     const connection = this.connectionRegistry.getFirstConnection();
     if (connection) {
@@ -1129,7 +1199,7 @@ class TaskHandler {
   }
   _prepareTaskData(req, taskId) {
     let requestBody = "";
-    if (req.body) {
+    if (req.body && Object.keys(req.body).length > 0) {
       requestBody = JSON.stringify(req.body);
     }
     return {
@@ -1151,7 +1221,6 @@ class TaskHandler {
     }
   }
   _sendErrorChunkToClient(res, errorMessage) {
-    // [伪装] 错误信息修改
     const errorPayload = {
       error: {
         message: `[系统提示] ${errorMessage}`,
@@ -1650,7 +1719,9 @@ class TaskHandler {
   }
 }
 
-// [伪装] 类名和日志修改
+// ===================================================================================
+// APPLICATION CORE (核心修改区)
+// ===================================================================================
 class ApplicationCore extends EventEmitter {
   constructor() {
     super();
@@ -1664,7 +1735,6 @@ class ApplicationCore extends EventEmitter {
       this.authSource
     );
     this.connectionRegistry = new ConnectionRegistry(this.logger);
-    // [伪装] 实例化修改后的类
     this.requestHandler = new TaskHandler(
       this,
       this.connectionRegistry,
@@ -1759,26 +1829,11 @@ class ApplicationCore extends EventEmitter {
       config.apiKeySource = "默认";
       this.logger.info("[System] 未设置任何访问密钥，已启用默认密码: 123456");
     }
-    const modelsPath = path.join(__dirname, "models.json");
-    try {
-      if (fs.existsSync(modelsPath)) {
-        const modelsFileContent = fs.readFileSync(modelsPath, "utf-8");
-        config.modelList = JSON.parse(modelsFileContent);
-        this.logger.info(
-          `[System] 已从 models.json 成功加载 ${config.modelList.length} 个模型。`
-        );
-      } else {
-        this.logger.warn(
-          `[System] 未找到 models.json 文件，将使用默认模型列表。`
-        );
-        config.modelList = ["gemini-1.5-pro-latest"];
-      }
-    } catch (error) {
-      this.logger.error(
-        `[System] 读取或解析 models.json 失败: ${error.message}，将使用默认模型列表。`
-      );
-      config.modelList = ["gemini-1.5-pro-latest"];
-    }
+    
+    // [删除] 移除加载 models.json 的逻辑
+    // 我们不再需要静态模型列表，将通过 API 动态获取
+    this.logger.info("[System] 模型列表将通过 API 动态获取，已忽略本地 models.json 文件。");
+
     this.config = config;
     this.logger.info("================ [ 生效配置 ] ================");
     this.logger.info(`  HTTP 服务端口: ${this.config.httpPort}`);
@@ -1929,14 +1984,11 @@ class ApplicationCore extends EventEmitter {
     });
   }
 
-  // [伪装] 路由、日志、HTML文本修改
   _createExpressApp() {
     const app = express();
-    // 关键修复1：信任Hugging Face的反向代理
     app.set('trust proxy', 1); 
 
     app.use((req, res, next) => {
-      // 日志记录逻辑（保持不变）
       if (
         req.path !== "/api/status" &&
         req.path !== "/" &&
@@ -1964,16 +2016,13 @@ class ApplicationCore extends EventEmitter {
         secret: sessionSecret,
         resave: false,
         saveUninitialized: true,
-        // 关键修复2：为HF的iframe环境配置cookie策略
         cookie: { 
-            secure: true,       // 必须为 true，因为 SameSite=None 只在 HTTPS 下生效
-            sameSite: 'none',   // 允许在跨站 iframe 中发送 cookie
+            secure: true,
+            sameSite: 'none',
             maxAge: 86400000 
         },
       })
     );
-    
-    // --- 后续所有路由逻辑和我上次发给你的最终版完全一样，无需改动 ---
     
     const isAuthenticated = (req, res, next) => {
       if (req.session.isAuthenticated) {
@@ -2020,7 +2069,6 @@ class ApplicationCore extends EventEmitter {
         res.sendFile(path.join(__dirname, 'index.html'));
     });
     
-    // 状态页面的完整代码（请确保你这里是完整的）
     app.get("/status", isAuthenticated, (req, res) => {
       const { config, requestHandler, authSource, browserManager } = this;
       const initialIndices = authSource.initialIndices || [];
@@ -2194,8 +2242,6 @@ class ApplicationCore extends EventEmitter {
                 }
             }).catch(error => { 
                 console.error('Error fetching new content:', error)
-                // If fetching status fails, it likely means the session expired. Reload to login page.
-                // Use a short delay to prevent thrashing if there's a recurring network issue.
                 setTimeout(() => window.location.reload(), 1500);
             });
         }
@@ -2240,8 +2286,6 @@ class ApplicationCore extends EventEmitter {
       res.status(200).send(statusHtml);
     });
 
-    
-    // ... 后续的 API 路由和代理逻辑，和之前的正确版本一样 ...
     app.get("/api/status", isAuthenticated, (req, res) => {
         const { config, requestHandler, authSource, browserManager } = this;
         const initialIndices = authSource.initialIndices || [];
@@ -2335,25 +2379,20 @@ class ApplicationCore extends EventEmitter {
             res.status(400).send('无效模式. 请用 "fake" 或 "real".');
         }
     });
+    
+    // --- 路由修改区 ---
     app.use(this._createAuthMiddleware());
+
+    // [修改] 将 /v1/models 路由指向新的动态处理方法
     app.get("/v1/models", (req, res) => {
-        const modelIds = this.config.modelList || ["gemini-1.5-pro"];
-        const models = modelIds.map((id) => ({
-            id: id,
-            object: "model",
-            created: Math.floor(Date.now() / 1000),
-            owned_by: "google",
-        }));
-        res.status(200).json({
-            object: "list",
-            data: models,
-        });
+      this.requestHandler.processModelListRequest(req, res);
     });
+
     app.post("/v1/chat/completions", (req, res) => {
-        this.requestHandler.processOpenAIRequest(req, res);
+      this.requestHandler.processOpenAIRequest(req, res);
     });
     app.all(/(.*)/, (req, res) => {
-        this.requestHandler.processRequest(req, res);
+      this.requestHandler.processRequest(req, res);
     });
 
     return app;
@@ -2376,7 +2415,6 @@ class ApplicationCore extends EventEmitter {
 async function initializeServer() {
   const initialAuthIndex = parseInt(process.env.INITIAL_AUTH_INDEX, 10) || 1;
   try {
-    // [伪装] 实例化修改后的类
     const serverSystem = new ApplicationCore();
     await serverSystem.start(initialAuthIndex);
   } catch (error) {
@@ -2389,5 +2427,4 @@ if (require.main === module) {
   initializeServer();
 }
 
-// [伪装] 导出修改后的类
 module.exports = { ApplicationCore, BrowserManager, initializeServer };
