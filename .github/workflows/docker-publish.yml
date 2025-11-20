@@ -1,49 +1,71 @@
-# .github/workflows/docker-publish.yml (正确版本 - 推送到 GHCR)
-name: Build and Push Docker Image to GHCR
+name: Build and Push Latest Image
 
 on:
   push:
-    branches: ["main"] # 当 main 分支有更新时触发
-  workflow_dispatch: {} # <--- 加上这行
+    branches: ["main"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # 关键：我们在这里指定依赖的上游仓库，保证 Fork 用户也能正确拉取
+  UPSTREAM_REPO: "butteryiyi/web" 
+
 jobs:
   build_and_push:
     runs-on: ubuntu-latest
-    # 【新增】授予 Actions 工作流写入 GitHub Packages 的权限
     permissions:
       contents: read
       packages: write
+      actions: read 
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Get Camoufox Download URL
-        id: get_camoufox_url
+      - name: Get Camoufox URL from Upstream Repo
+        id: get_url
+        env:
+          # 将 GitHub Token 传递给 gh 命令，用于 API认证
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          URL=$(curl -s "https://api.github.com/repos/${{ github.repository }}/releases/latest" | grep "browser_download_url.*camoufox-linux.tar.gz" | cut -d : -f 2,3 | tr -d '", ')
-          echo "CAMOUFOX_URL=$URL" >> $GITHUB_ENV
+          echo "正在从上游仓库 [${{ env.UPSTREAM_REPO }}] 的 latest release 中获取依赖..."
+          
+          # 使用官方的 GitHub CLI，比 curl+grep+cut 更稳定可靠
+          # 它会精确查找名为 camoufox-linux.tar.gz 的文件并返回其下载 URL
+          URL=$(gh release view --repo ${{ env.UPSTREAM_REPO }} --json assets --jq '.assets[] | select(.name == "camoufox-linux.tar.gz") | .url')
+          
+          if [[ -z "$URL" ]]; then
+            echo "::error::在仓库 ${{ env.UPSTREAM_REPO }} 的 latest release 中没有找到 'camoufox-linux.tar.gz' 文件！"
+            exit 1
+          fi
+          
+          echo "成功获取依赖 URL: $URL"
+          # 使用 GITHUB_OUTPUT 将 URL 传递给后续步骤
+          echo "url=$URL" >> $GITHUB_OUTPUT
 
-      # --- 【核心修改 1】登录到 GitHub Container Registry (ghcr.io) ---
-      - name: Log in to GitHub Container Registry
+      - name: Log in to the Container registry
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}         # 你的 GitHub 用户名, butteryiyi
-          password: ${{ secrets.GITHUB_TOKEN }} # 使用 GitHub 自动生成的安全令牌
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
           push: true
-          # --- 【核心修改 2】将镜像标签指向 ghcr.io ---
-          # ${{ github.repository }} 会自动变成 butteryiyi/web
-          tags: ghcr.io/${{ github.repository }}:latest 
+          tags: ${{ steps.meta.outputs.tags }}
           build-args: |
-            CAMOUFOX_URL=${{ env.CAMOUFOX_URL }}
+            CAMOUFOX_URL=${{ steps.get_url.outputs.url }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
