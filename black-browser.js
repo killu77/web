@@ -241,22 +241,7 @@ class DataFetcher {
             delete bodyObj.generationConfig.thinkingConfig;
           }
         }
-        if (bodyObj.contents && bodyObj.contents.length > 0) {
-          const currentTurn = bodyObj.contents[bodyObj.contents.length - 1];
-          if (currentTurn.parts?.length > 0) {
-            let lastTextPart = currentTurn.parts.findLast((p) => p.text);
-            if (lastTextPart) {
-              if (!lastTextPart.text.includes("[sig:")) {
-                lastTextPart.text += `\n\n[sig:${this._generateRandomString(5)}]`;
-              }
-            } else {
-              currentTurn.parts.push({
-                text: `\n\n[sig:${this._generateRandomString(5)}]`,
-              });
-            }
-          }
-        }
-
+        
         config.body = JSON.stringify(bodyObj);
       } catch (e) {
         Logger.output("处理请求体时发生错误:", e.message);
