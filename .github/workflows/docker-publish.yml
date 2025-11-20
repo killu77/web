@@ -16,11 +16,15 @@ jobs:
     permissions:
       contents: read
       packages: write
-      actions: write  # <<-- 关键修复：从 'read' 改为 'write'，以允许写入构建缓存
+      actions: write # 允许写入 GitHub Actions 缓存
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # <<-- 关键修复：重新添加这一步来创建支持高级功能的 buildx 构建器
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Get Camoufox URL from Upstream Repo
         id: get_url
@@ -61,6 +65,6 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             CAMOUFOX_URL=${{ steps.get_url.outputs.url }}
-          # 缓存设置本身是正确的，现在有了权限，它们就能正常工作了
+          # 这一步现在可以正常工作了，因为 setup-buildx-action 已经准备好了环境
           cache-from: type=gha
           cache-to: type=gha,mode=max
