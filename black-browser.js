@@ -1,3 +1,4 @@
+
 const Logger = {
   enabled: true,
   output(...messages) {
@@ -6,7 +7,6 @@ const Logger = {
       new Date().toLocaleTimeString("zh-CN", { hour12: false }) +
       "." +
       new Date().getMilliseconds().toString().padStart(3, "0");
-    // [伪装] 日志前缀修改
     console.log(`[BrowserTask] ${timestamp}`, ...messages);
     const logElement = document.createElement("div");
     logElement.textContent = `[${timestamp}] ${messages.join(" ")}`;
@@ -81,7 +81,6 @@ class ConnectionManager extends EventTarget {
   }
 }
 
-// [伪装] 类名修改
 class DataFetcher {
   constructor() {
     this.activeOperations = new Map();
@@ -125,7 +124,8 @@ class DataFetcher {
             requestSpec.method,
             requestSpec.path
           );
-
+          
+          // [修改] 将 URL 构建和请求配置构建分离，以便在构建配置时仍能访问原始路径
           const requestUrl = this._constructUrl(requestSpec);
           const requestConfig = this._buildRequestConfig(
             requestSpec,
@@ -136,7 +136,7 @@ class DataFetcher {
 
           if (!response.ok) {
             const errorBody = await response.text();
-            // [伪装] 日志文本修改
+
             const error = new Error(
               `目标服务返回错误: ${response.status} ${response.statusText} ${errorBody}`
             );
@@ -187,8 +187,32 @@ class DataFetcher {
       ? requestSpec.path.substring(1)
       : requestSpec.path;
     const queryParams = new URLSearchParams(requestSpec.query_params);
+
+    // 按需假流式功能，使用"/buffered/" 前缀
+    if (pathSegment.includes("/buffered/")) {
+      pathSegment = pathSegment.replace("/buffered/", "/");
+      requestSpec.streaming_mode = "fake"; // 强制覆盖为假流式
+      Logger.output(
+        `[+] 检测到缓冲模式前缀，已激活。修正后路径: ${pathSegment}`
+      );
+    }
+
+    // 移除功能性后缀，让最终请求 URL 更干净
+    const [modelPart, actionPart] = pathSegment.split(":");
+    if (actionPart !== undefined) {
+      const originalModelPart = modelPart;
+      // 移除所有已知的功能后缀
+      const cleanedModelPart = originalModelPart.replace(/-search/g, "");
+
+      if (originalModelPart !== cleanedModelPart) {
+        pathSegment = `${cleanedModelPart}:${actionPart}`;
+        Logger.output(`[+] 已规范化功能后缀，最终请求路径: ${pathSegment}`);
+      }
+    }
+    
+    // 原有的假流式处理逻辑保持不变
     if (requestSpec.streaming_mode === "fake") {
-      Logger.output("模拟流式模式激活，正在修改请求...");
+      Logger.output("缓冲响应模式激活，正在修改请求...");
       if (pathSegment.includes(":streamGenerateContent")) {
         pathSegment = pathSegment.replace(
           ":streamGenerateContent",
@@ -206,15 +230,7 @@ class DataFetcher {
       queryString ? "?" + queryString : ""
     }`;
   }
-
-  _generateRandomString(length) {
-    const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-    let result = "";
-    for (let i = 0; i < length; i++)
-      result += chars.charAt(Math.floor(Math.random() * chars.length));
-    return result;
-  }
-
+  
   _buildRequestConfig(requestSpec, signal) {
     const config = {
       method: requestSpec.method,
@@ -228,6 +244,16 @@ class DataFetcher {
     ) {
       try {
         let bodyObj = JSON.parse(requestSpec.body);
+        
+        // 实现联网功能，检查的是原始路径
+        if (requestSpec.path.includes("-search")) {
+          if (!bodyObj.tools) {
+            bodyObj.tools = [{ "google_search": {} }];
+            Logger.output("[+] 检测到特殊后缀，正在为请求启用增强工具...");
+          }
+        }
+        
+        // 原有的智能过滤逻辑保持不变
         const isImageModel =
           requestSpec.path.includes("-image-") ||
           requestSpec.path.includes("imagen");
@@ -240,6 +266,7 @@ class DataFetcher {
           if (bodyObj.generationConfig?.thinkingConfig) {
             delete bodyObj.generationConfig.thinkingConfig;
           }
+           Logger.output("[+] 检测到图像任务，已自动清理不兼容参数。");
         }
         
         config.body = JSON.stringify(bodyObj);
@@ -251,6 +278,7 @@ class DataFetcher {
 
     return config;
   }
+  
   _sanitizeHeaders(headers) {
     const sanitized = { ...headers };
     [
@@ -266,6 +294,7 @@ class DataFetcher {
     ].forEach((h) => delete sanitized[h]);
     return sanitized;
   }
+  
   cancelOperation(operationId) {
     this.cancelledOperations.add(operationId);
     const controller = this.activeOperations.get(operationId);
@@ -276,7 +305,7 @@ class DataFetcher {
   }
 }
 
-// [伪装] 类名修改
+//  PageWorker 及后续逻辑均无需修改，完全复用你已有的健壮代码
 class PageWorker extends EventTarget {
   constructor(websocketEndpoint) {
     super();
@@ -332,17 +361,18 @@ class PageWorker extends EventTarget {
     }
   }
 
-  // [伪装] 函数名和日志修改
   async _processDataRequest(requestSpec) {
     const operationId = requestSpec.request_id;
-    const mode = requestSpec.streaming_mode || "fake";
+    
+    // 注意：这里的 mode 将由 _constructUrl 方法根据路径前缀动态修改
+    const mode = requestSpec.streaming_mode || "real"; 
     Logger.output(`浏览器收到任务`);
 
     try {
       if (this.dataFetcher.cancelledOperations.has(operationId)) {
         throw new DOMException("The user aborted a request.", "AbortError");
       }
-      const { responsePromise } = this.dataFetcher.execute(
+      const { responsePromise, cancelTimeout } = this.dataFetcher.execute(
         requestSpec,
         operationId
       );
@@ -350,7 +380,10 @@ class PageWorker extends EventTarget {
       if (this.dataFetcher.cancelledOperations.has(operationId)) {
         throw new DOMException("The user aborted a request.", "AbortError");
       }
-
+      
+      // 收到响应头后，就可以取消空闲超时计时器了
+      cancelTimeout();
+      
       this._transmitHeaders(response, operationId);
       const reader = response.body.getReader();
       const textDecoder = new TextDecoder();
@@ -421,7 +454,6 @@ class PageWorker extends EventTarget {
 
   _sendErrorResponse(error, operationId) {
     if (!operationId) return;
-    // [伪装] 错误信息修改
     this.connectionManager.transmit({
       request_id: operationId,
       event_type: "error",
@@ -436,7 +468,6 @@ class PageWorker extends EventTarget {
   }
 }
 
-// [伪装] 函数名和日志修改
 async function initializePageWorker() {
   document.body.innerHTML = "";
   const pageWorker = new PageWorker();
