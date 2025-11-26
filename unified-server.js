@@ -1069,7 +1069,22 @@ class TaskHandler {
             );
           } else {
             responseContent =
-              candidate.content.parts.map((p) => p.text).join("\n") || "";
+              candidate.content.parts
+                .filter((p) => !p.thought)
+                .map((p) => p.text)
+                .join("\n") || "";
+          }
+        }
+
+        const messageObj = { role: "assistant", content: responseContent };
+        if (
+          candidate &&
+          candidate.content &&
+          Array.isArray(candidate.content.parts)
+        ) {
+          const thoughtPart = candidate.content.parts.find((p) => p.thought);
+          if (thoughtPart) {
+            messageObj.reasoning_content = thoughtPart.text;
           }
         }
 
@@ -1081,7 +1096,7 @@ class TaskHandler {
           choices: [
             {
               index: 0,
-              message: { role: "assistant", content: responseContent },
+              message: messageObj,
               finish_reason: candidate?.finishReason || "UNKNOWN",
             },
           ],
@@ -1642,6 +1657,14 @@ class TaskHandler {
       maxOutputTokens: openaiBody.max_tokens,
       stopSequences: openaiBody.stop,
     };
+
+    if (modelName.includes("gemini-3-pro-preview")) {
+      generationConfig.thinkingConfig = {
+        includeThoughts: true,
+        thinkingLevel: "HIGH",
+      };
+    }
+
     googleRequest.generationConfig = generationConfig;
     googleRequest.safetySettings = [
       { category: "HARM_CATEGORY_HARASSMENT", threshold: "BLOCK_NONE" },
@@ -1691,16 +1714,32 @@ class TaskHandler {
       return null;
     }
     let content = "";
+    let reasoningContent = null;
+
     if (candidate.content && Array.isArray(candidate.content.parts)) {
+      const thoughtPart = candidate.content.parts.find((p) => p.thought);
+      if (thoughtPart) {
+        reasoningContent = thoughtPart.text;
+      }
+
       const imagePart = candidate.content.parts.find((p) => p.inlineData);
       if (imagePart) {
         const image = imagePart.inlineData;
         content = `![Generated Image](data:${image.mimeType};base64,${image.data})`;
         this.logger.info("[CompatLayer] 从流式响应块中成功解析到图片。");
       } else {
-        content = candidate.content.parts.map((p) => p.text).join("") || "";
+        content =
+          candidate.content.parts
+            .filter((p) => !p.thought)
+            .map((p) => p.text)
+            .join("") || "";
       }
     }
+
+    const delta = {};
+    if (content) delta.content = content;
+    if (reasoningContent) delta.reasoning_content = reasoningContent;
+
     const finishReason = candidate.finishReason;
     const openaiResponse = {
       id: `chatcmpl-${this._generateTaskId()}`,
@@ -1710,7 +1749,7 @@ class TaskHandler {
       choices: [
         {
           index: 0,
-          delta: { content: content },
+          delta: delta,
           finish_reason: finishReason || null,
         },
       ],
@@ -2036,12 +2075,101 @@ class ApplicationCore extends EventEmitter {
         return res.redirect("/status");
       }
       const loginHtml = `
-      <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>登录</title>
-      <style>body{display:flex;justify-content:center;align-items:center;height:100vh;font-family:sans-serif;background:#f0f2f5}form{background:white;padding:40px;border-radius:10px;box-shadow:0 4px 8px rgba(0,0,0,0.1);text-align:center}input{width:250px;padding:10px;margin-top:10px;border:1px solid #ccc;border-radius:5px}button{width:100%;padding:10px;background-color:#007bff;color:white;border:none;border-radius:5px;margin-top:20px;cursor:pointer}.error{color:red;margin-top:10px}</style>
-      </head><body><form action="/login" method="post"><h2>请输入访问密钥</h2>
-      <input type="password" name="apiKey" placeholder="Access Key" required autofocus><button type="submit">登录</button>
+      <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>✨ 魔法少女登录 ✨</title>
+      <style>
+        body {
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          height: 100vh;
+          font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+          background: linear-gradient(135deg, #fdfbfb 0%, #ebedee 100%);
+          background-image: url('https://img.freepik.com/free-vector/hand-drawn-kawaii-pattern-design_23-2149636655.jpg'); /* 可爱的背景图 */
+          background-size: cover;
+          margin: 0;
+        }
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(255, 255, 255, 0.6); /* 半透明遮罩 */
+            z-index: 0;
+        }
+        form {
+          position: relative;
+          z-index: 1;
+          background: rgba(255, 255, 255, 0.9);
+          padding: 50px;
+          border-radius: 25px;
+          box-shadow: 0 10px 25px rgba(255, 182, 193, 0.4);
+          text-align: center;
+          border: 3px solid #ffb6c1;
+          max-width: 350px;
+          width: 100%;
+        }
+        h2 {
+          color: #ff69b4;
+          margin-bottom: 30px;
+          font-size: 24px;
+          text-shadow: 1px 1px 2px #fff;
+        }
+        input {
+          width: 100%;
+          padding: 15px;
+          margin-top: 15px;
+          border: 2px solid #ffc0cb;
+          border-radius: 15px;
+          box-sizing: border-box;
+          font-size: 16px;
+          outline: none;
+          transition: border-color 0.3s;
+        }
+        input:focus {
+          border-color: #ff69b4;
+        }
+        button {
+          width: 100%;
+          padding: 15px;
+          background-color: #ff69b4;
+          color: white;
+          border: none;
+          border-radius: 15px;
+          margin-top: 30px;
+          cursor: pointer;
+          font-size: 18px;
+          font-weight: bold;
+          transition: background-color 0.3s, transform 0.2s;
+          box-shadow: 0 4px 6px rgba(255, 105, 180, 0.3);
+        }
+        button:hover {
+          background-color: #ff1493;
+          transform: translateY(-2px);
+        }
+        button:active {
+          transform: translateY(0);
+        }
+        .error {
+          color: #ff4500;
+          margin-top: 15px;
+          font-weight: bold;
+        }
+        .decoration {
+            font-size: 40px;
+            margin-bottom: -20px;
+            display: block;
+        }
+      </style>
+      </head><body>
+      <div class="overlay"></div>
+      <form action="/login" method="post">
+      <span class="decoration">🌸</span>
+      <h2>✨ 请输入魔法咒语 ✨</h2>
+      <input type="password" name="apiKey" placeholder="Access Key" required autofocus>
+      <button type="submit">开启魔法之门</button>
       ${
-        req.query.error ? '<p class="error">访问密钥错误!</p>' : ""
+        req.query.error ? '<p class="error">咒语念错啦! (密钥错误)</p>' : ""
       }</form></body></html>`;
       res.send(loginHtml);
     });
@@ -2099,101 +2227,179 @@ class ApplicationCore extends EventEmitter {
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>服务运行状态</title>
+        <title>✨ 魔法服务状态 ✨</title>
         <style>
-        body { font-family: 'SF Mono', 'Consolas', 'Menlo', monospace; background-color: #f0f2f5; color: #333; padding: 2em; margin: 0; }
-        .container { max-width: 800px; margin: 0 auto; background: #fff; padding: 1em 2em 2em 2em; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        h1, h2 { color: #333; border-bottom: 2px solid #eee; padding-bottom: 0.5em;}
-        pre { background: #2d2d2d; color: #f0f0f0; font-size: 1.1em; padding: 1.5em; border-radius: 8px; white-space: pre-wrap; word-wrap: break-word; line-height: 1.6; }
-        #log-container { font-size: 0.9em; max-height: 400px; overflow-y: auto; }
-        .status-ok { color: #2ecc71; font-weight: bold; }
-        .status-error { color: #e74c3c; font-weight: bold; }
-        .label { display: inline-block; width: 220px; box-sizing: border-box; }
-        .dot { height: 10px; width: 10px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-left: 10px; animation: blink 1s infinite alternate; }
-        @keyframes blink { from { opacity: 0.3; } to { opacity: 1; } }
-        .action-group { display: flex; flex-wrap: wrap; gap: 15px; align-items: center; }
-        .action-group button, .action-group select { font-size: 1em; border: 1px solid #ccc; padding: 10px 15px; border-radius: 8px; cursor: pointer; transition: background-color 0.3s ease; }
-        .action-group button:hover { opacity: 0.85; }
-        #switch-btn { background-color: #007bff; color: white; border-color: #007bff; }
-        #mode-btn { background-color: #17a2b8; color: white; border-color: #17a2b8; }
-        #logout-btn { background-color: #dc3545; color: white; border-color: #dc3545; margin-left: auto; }
-        .action-group select { background-color: #ffffff; color: #000000; -webkit-appearance: none; appearance: none; }
-        @media (max-width: 600px) {
-            body { 
-                padding: 0.5em;
-            }
-            .container {
-                padding: 1em; 
-                margin: 0.5em;
-                width: auto;
-            }
-            pre {
-                padding: 1em;
-                font-size: 0.9em;
-            }
-            .label {
-                width: auto; 
-                display: inline;
-            }
-            .action-group {
-                flex-direction: column;
-                align-items: stretch;
-            }
-            #logout-btn { margin-left: 0; }
-            .action-group select, .action-group button {
-                width: 100%;
-                box-sizing: border-box; 
-            }
+        body {
+            font-family: 'Segoe UI', 'Microsoft YaHei', sans-serif;
+            background-color: #fff0f5;
+            background-image: linear-gradient(to right, #ffecd2 0%, #fcb69f 100%);
+            color: #555;
+            padding: 2em;
+            margin: 0;
         }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            padding: 2em;
+            border-radius: 20px;
+            box-shadow: 0 10px 20px rgba(255, 182, 193, 0.3);
+            border: 2px solid #ffe4e1;
+        }
+        h1, h2 {
+            color: #ff69b4;
+            border-bottom: 2px dashed #ffb6c1;
+            padding-bottom: 0.5em;
+            text-align: center;
+        }
+        h1 { font-size: 2em; }
+        h2 { font-size: 1.5em; margin-top: 1.5em; }
+        
+        pre {
+            background: #fff5f8;
+            color: #444;
+            font-size: 1em;
+            padding: 1.5em;
+            border-radius: 15px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            line-height: 1.8;
+            border: 1px solid #ffc0cb;
+            font-family: 'Consolas', monospace;
+        }
+        #log-container {
+            font-size: 0.9em;
+            max-height: 400px;
+            overflow-y: auto;
+            background: #2d2d2d; /* 日志保持深色背景以便阅读 */
+            color: #f0f0f0;
+            border: 2px solid #ffb6c1;
+        }
+        
+        .status-ok { color: #32cd32; font-weight: bold; }
+        .status-error { color: #ff4500; font-weight: bold; }
+        .label { display: inline-block; width: 220px; box-sizing: border-box; color: #888; font-weight: 500; }
+        
+        .dot {
+            height: 12px;
+            width: 12px;
+            background-color: #ff69b4;
+            border-radius: 50%;
+            display: inline-block;
+            margin-left: 10px;
+            animation: blink 1s infinite alternate;
+            box-shadow: 0 0 5px #ff69b4;
+        }
+        @keyframes blink { from { opacity: 0.4; transform: scale(0.8); } to { opacity: 1; transform: scale(1.2); } }
+        
+        .action-group {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 15px;
+            align-items: center;
+            justify-content: center;
+            background: #fff0f5;
+            padding: 20px;
+            border-radius: 15px;
+        }
+        
+        .action-group button, .action-group select {
+            font-size: 1em;
+            border: 2px solid #ffb6c1;
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            outline: none;
+        }
+        
+        .action-group select {
+            background-color: #fff;
+            color: #ff69b4;
+        }
+        
+        .action-group button {
+            font-weight: bold;
+            box-shadow: 0 3px 5px rgba(0,0,0,0.1);
+        }
+        
+        .action-group button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 8px rgba(0,0,0,0.15);
+        }
+        
+        #switch-btn { background-color: #ff69b4; color: white; border-color: #ff69b4; }
+        #switch-btn:hover { background-color: #ff1493; }
+        
+        #mode-btn { background-color: #87ceeb; color: white; border-color: #87ceeb; }
+        #mode-btn:hover { background-color: #00bfff; }
+        
+        #logout-btn { background-color: #ff7f50; color: white; border-color: #ff7f50; }
+        #logout-btn:hover { background-color: #ff4500; }
+        
+        @media (max-width: 600px) {
+            body { padding: 0.5em; }
+            .container { padding: 1em; margin: 0.5em; width: auto; }
+            pre { padding: 1em; font-size: 0.9em; }
+            .label { width: auto; display: inline; }
+            .action-group { flex-direction: column; align-items: stretch; }
+            .action-group select, .action-group button { width: 100%; }
+        }
+        
+        /* 滚动条美化 */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #fff0f5; }
+        ::-webkit-scrollbar-thumb { background: #ffb6c1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #ff69b4; }
         </style>
     </head>
     <body>
         <div class="container">
-        <h1>服务运行状态 <span class="dot" title="数据动态刷新中..."></span></h1>
+        <h1>✨ 魔法服务状态 ✨ <span class="dot" title="魔法能量充盈中..."></span></h1>
         <div id="status-section">
             <pre>
-<span class="label">服务状态</span>: <span class="status-ok">Running</span>
-<span class="label">浏览器连接</span>: <span class="${
+<span class="label">🌟 服务状态</span>: <span class="status-ok">运行中 (Running)</span>
+<span class="label">🌐 浏览器连接</span>: <span class="${
         browserManager.browser ? "status-ok" : "status-error"
-      }">${!!browserManager.browser}</span>
---- 服务配置 ---
-<span class="label">流模式</span>: ${
+      }">${!!browserManager.browser ? "已连接 (Connected)" : "断开 (Disconnected)"}</span>
+--- ⚙️ 魔法配置 ---
+<span class="label">🌊 流模式</span>: ${
         config.streamingMode
       } (仅启用流式传输时生效)
-<span class="label">立即切换 (状态码)</span>: ${
+<span class="label">⚡ 立即切换 (状态码)</span>: ${
         config.immediateSwitchStatusCodes.length > 0
           ? `[${config.immediateSwitchStatusCodes.join(", ")}]`
           : "已禁用"
       }
-<span class="label">访问密钥</span>: ${config.apiKeySource}
---- 账号状态 ---
-<span class="label">当前使用账号</span>: #${requestHandler.currentAuthIndex}
-<span class="label">使用次数计数</span>: ${requestHandler.usageCount} / ${
+<span class="label">🔑 访问密钥</span>: ${config.apiKeySource}
+--- 👤 账号状态 ---
+<span class="label">👉 当前使用账号</span>: #${requestHandler.currentAuthIndex}
+<span class="label">📊 使用次数计数</span>: ${requestHandler.usageCount} / ${
         config.switchOnUses > 0 ? config.switchOnUses : "N/A"
       }
-<span class="label">连续失败计数</span>: ${requestHandler.failureCount} / ${
+<span class="label">❌ 连续失败计数</span>: ${requestHandler.failureCount} / ${
         config.failureThreshold > 0 ? config.failureThreshold : "N/A"
       }
-<span class="label">扫描到的总帐号</span>: [${initialIndices.join(
+<span class="label">📋 扫描到的总帐号</span>: [${initialIndices.join(
         ", "
       )}] (总数: ${initialIndices.length})
       ${accountDetailsHtml}
-<span class="label">格式错误 (已忽略)</span>: [${invalidIndices.join(
+<span class="label">⚠️ 格式错误 (已忽略)</span>: [${invalidIndices.join(
         ", "
       )}] (总数: ${invalidIndices.length})
             </pre>
         </div>
         <div id="log-section" style="margin-top: 2em;">
-            <h2>实时日志 (最近 ${logs.length} 条)</h2>
+            <h2>📜 魔法日志 (最近 ${logs.length} 条)</h2>
             <pre id="log-container">${logs.join("\n")}</pre>
         </div>
         <div id="actions-section" style="margin-top: 2em;">
-            <h2>操作面板</h2>
+            <h2>🎮 魔法控制台</h2>
             <div class="action-group">
                 <select id="accountIndexSelect">${accountOptionsHtml}</select>
-                <button id="switch-btn" onclick="switchSpecificAccount()">切换指定账号</button>
-                <button id="mode-btn" onclick="toggleStreamingMode()">切换流模式</button>
-                <button id="logout-btn" onclick="window.location.href='/logout'">登出</button>
+                <button id="switch-btn" onclick="switchSpecificAccount()">✨ 切换指定账号</button>
+                <button id="mode-btn" onclick="toggleStreamingMode()">🌊 切换流模式</button>
+                <button id="logout-btn" onclick="window.location.href='/logout'">🚪 退出魔法屋</button>
             </div>
         </div>
         </div>
